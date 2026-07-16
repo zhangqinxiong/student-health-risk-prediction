@@ -1,4 +1,31 @@
+# Data (large files, should not be committed)
+input/
+*.csv
+
+# Python cache
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 .ipynb_checkpoints/
+
+# CatBoost training logs
 catboost_info/
-playground-series-s6e7.zip
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+venv/
+.venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Kaggle output (generated submission)
+submission.csv
