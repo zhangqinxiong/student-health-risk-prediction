@@ -1,7 +1,3 @@
-# Data (large files, should not be committed)
-input/
-*.csv
-
 # Python cache
 __pycache__/
 *.pyc
@@ -9,12 +5,20 @@ __pycache__/
 *.pyd
 .ipynb_checkpoints/
 
+# Data (large files, use LFS or download separately)
+input/train.csv
+input/test.csv
+input/sample_submission.csv
+
 # CatBoost training logs
 catboost_info/
 
 # IDE / OS
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
 
@@ -27,5 +31,5 @@ env/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# Kaggle output (generated submission)
-submission.csv
+# Kaggle download
+playground-series-s6e7.zip

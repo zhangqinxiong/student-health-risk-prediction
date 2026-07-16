@@ -1,85 +1,67 @@
-# Student Health Risk Prediction
+# Predicting Student Health Risk
 
 [![Kaggle](https://img.shields.io/badge/Kaggle-Playground%20Series%20S6E7-blue)](https://kaggle.com/competitions/playground-series-s6e7)
 
-Predict student health status (fit / at-risk / unhealthy) from lifestyle and physiological indicators using CatBoost.
+Multiclass classification predicting student health status (**fit / at-risk / unhealthy**) from lifestyle and physiological indicators, using **CatBoost** with GPU acceleration.
+
+**Public LB Score: ~0.9494** (Balanced Accuracy)
+
+## Problem
+
+Severe class imbalance (85.9% at-risk, 8.4% unhealthy, 5.8% fit). Evaluation metric: **Balanced Accuracy**.
+
+## Pipeline
+
+```
+train.csv/test.csv → missing fill → Ordinal/OneHot encode → CatBoost 5-Fold CV → average → submission.csv
+```
+
+| Step | Detail |
+|------|--------|
+| **Numeric missing** | Median fill (7 features: sleep_duration, heart_rate, bmi, etc.) |
+| **Categorical missing** | Fill with `'missing'` as independent category (retains missing signal) |
+| **Ordinal encode** | stress_level, sleep_quality, physical_activity_level |
+| **OneHot encode** | diet_type, smoking_alcohol, gender |
+| **Model** | CatBoost (GPU, `auto_class_weights='Balanced'`, early stopping 100) |
+| **CV** | 5-Fold Stratified, average test predictions |
+| **Output** | `output/submission.csv` |
 
 ## Results
 
-| Metric | Value |
-|--------|-------|
-| Balanced Accuracy (5-Fold CV) | **0.9489** |
-| Overall Accuracy | 94% |
-| Features | 13 (7 numeric + 6 ordinal) |
-| Model | CatBoost (default params) |
+| Seed | CV Balanced Accuracy |
+|------|:---:|
+| 42 | 0.9494 |
+| 999 | 0.9495 |
+| 5-seed avg | 0.9493 |
+| **Public LB** | **~0.9494** |
 
-Per-class performance:
-| Class | Precision | Recall | F1-Score |
-|-------|-----------|--------|----------|
-| at-risk | 0.99 | 0.93 | 0.96 |
-| fit | 0.73 | 0.95 | 0.82 |
-| unhealthy | 0.69 | 0.96 | 0.80 |
+### Feature Importance
 
-## Problem Overview
+| Feature | Importance |
+|---------|:---------:|
+| sleep_duration | 22% |
+| stress_level | 18% |
+| bmi | 15% |
+| exercise_duration, heart_rate, water_intake, step_count, ... | 6-7% each |
 
-Multiclass classification with severe class imbalance:
-| Class | Samples | Percentage |
-|-------|---------|------------|
-| at-risk | 592,561 | 85.87% |
-| unhealthy | 57,724 | 8.36% |
-| fit | 39,803 | 5.77% |
+## Key Insight
 
-**13 raw features**: sleep_duration, heart_rate, bmi, calorie_expenditure, step_count, exercise_duration, water_intake, diet_type, stress_level, sleep_quality, physical_activity_level, smoking_alcohol, gender.
-
-## Feature Engineering
-
-Minimal — only ordinal encoding + imputation:
-
-| Step | Description |
-|------|-------------|
-| Ordinal encoding | 6 categoricals → 0/1/2 (BEFORE imputation, preserves NaN) |
-| Imputation | Median for numeric, mode for categorical (ordinals keep NaN) |
-| Final | 7 raw numeric + 6 ordinal encoded = **13 features** |
-
-**Why encode before impute?** CatBoost's native NaN handling captures missing signal.
-- encode → impute: **0.949** ✅ (CatBoost sees NaN in ordinal columns)
-- impute → encode: **0.908** ❌ (all values filled, no missing signal)
-
-Derived features, binning, and OHE were tested and contributed < 0.04% combined.
-
-## Key EDA Insights
-- **sleep_duration**: strongest predictor — fit(7.95h) > at-risk(7.09h) > unhealthy(5.37h)
-- **stress_level**: near-deterministic — high=97.5% unhealthy, low=20% fit, medium=99.4% at-risk
-- **physical_activity**: active=96.8% fit, sedentary=91.7% at-risk
-- **bmi**: unhealthy(24.1) > at-risk(23.0) > fit(21.8)
+Changing categorical NaN from mode imputation to `'missing'` as a separate category improved Balanced Accuracy from **0.909 → 0.949** (+4%). All other feature engineering attempts (interactions, ratios, polynomials) showed no significant gain.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `run.py` | Training script |
-| `predicting_student_health_risk.ipynb` | Jupyter notebook |
-| `input/` | Training/testing data |
-| `output/` | Generated submissions |
+| `train.py` | Main training script |
+| `input/` | Data files (train.csv, test.csv) |
+| `output/` | Submission CSV |
 
 ## Usage
 
 ```bash
 pip install pandas numpy scikit-learn catboost
-python run.py
+python train.py
 ```
-
-## Model Parameters
-
-| Parameter | Value | Reason |
-|-----------|-------|--------|
-| loss_function | MultiClass | 3-class classification |
-| auto_class_weights | Balanced | Handle 85.9%/8.4%/5.8% imbalance |
-| task_type | GPU | GPU acceleration |
-| early_stopping_rounds | 50 | Prevent overfitting |
-| use_best_model | True | Revert to best iteration |
-
-All other parameters use CatBoost defaults: `depth=6`, `learning_rate=auto`, `iterations=1000`.
 
 ## License
 
