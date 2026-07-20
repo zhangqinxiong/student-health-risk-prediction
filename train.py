@@ -1,12 +1,16 @@
+import time
+import io
+import contextlib
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder, LabelEncoder
+from sklearn.preprocessing import LabelEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import balanced_accuracy_score, f1_score
+from sklearn.metrics import balanced_accuracy_score
 from sklearn.utils.class_weight import compute_sample_weight
 from catboost import CatBoostClassifier, Pool
 from xgboost import XGBClassifier
+from xgboost.callback import EarlyStopping as XGBEarlyStopping
 from lightgbm import LGBMClassifier, early_stopping as lgb_early_stopping, log_evaluation as lgb_log_eval
 import warnings
 warnings.filterwarnings('ignore')
@@ -31,15 +35,8 @@ numeric_features = [
     'step_count', 'exercise_duration', 'water_intake'
 ]
 
-ordinal_features = ['stress_level', 'sleep_quality', 'physical_activity_level']
-ordinal_categories = [
-    ['low', 'medium', 'high', 'missing'],
-    ['poor', 'average', 'good', 'missing'],
-    ['sedentary', 'moderate', 'active', 'missing']
-]
-
-onehot_features = ['diet_type', 'smoking_alcohol', 'gender']
-cat_features = ordinal_features + onehot_features
+onehot_features = ['stress_level', 'sleep_quality', 'physical_activity_level', 'diet_type', 'smoking_alcohol', 'gender']
+cat_features = onehot_features
 
 for df in [train, test]:
     for col in numeric_features:
@@ -48,8 +45,6 @@ for df in [train, test]:
         df[col] = df[col].fillna('missing')
 
 preprocessor = ColumnTransformer(transformers=[
-    ('ordinal', OrdinalEncoder(categories=ordinal_categories), ordinal_features),
-    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False), onehot_features),
     ('num', 'passthrough', numeric_features)
 ])
 
@@ -69,6 +64,9 @@ test_lgb = np.zeros((len(test), 3))
 catb_scores = []
 xgb_scores = []
 lgb_scores = []
+catb_models = []
+xgb_models = []
+lgb_models = []
 
 global_prior = np.bincount(target_encoded, minlength=n_classes) / len(target_encoded)
 
@@ -101,9 +99,12 @@ for col in cat_features:
     te_col_names.append(f'{col}_count')
 
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_base, target_encoded)):
+    fold_start = time.time()
+    te_start = time.time()
     print(f'\n{"="*60}')
     print(f'Fold {fold + 1}/{N_FOLDS}')
     print(f'{"="*60}')
+    print(f'  Train size: {len(train_idx)}  |  Val size: {len(val_idx)}')
 
     # --- Target Encoding (per-fold, leakage-free) ---
     te_train_list = []
@@ -148,70 +149,92 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_base, target_encoded)):
     X_test_fold = np.hstack([X_test_base, te_test])
 
     y_train_fold, y_val_fold = target_encoded[train_idx], target_encoded[val_idx]
+    te_time = time.time() - te_start
 
     # --- CatBoost ---
+    t0 = time.time()
     catb = CatBoostClassifier(
         task_type='GPU',
         auto_class_weights='Balanced',
         early_stopping_rounds=100,
         eval_metric='MultiClass',
         random_seed=RANDOM_STATE,
+        learning_rate=0.03,
+        n_estimators=3000,
         verbose=0
     )
     catb.fit(Pool(X_train_fold, y_train_fold), eval_set=Pool(X_val_fold, y_val_fold), use_best_model=True)
+    catb_train_t = time.time() - t0
 
     catb_val_proba = catb.predict_proba(X_val_fold)
     oof_catb[val_idx] = catb_val_proba
-    catb_ba = balanced_accuracy_score(y_val_fold, catb_val_proba.argmax(axis=1))
-    catb_f1 = f1_score(y_val_fold, catb_val_proba.argmax(axis=1), average='macro')
-    catb_scores.append(catb_ba)
-    catb_test_proba = catb.predict_proba(X_test_fold)
-    test_catb += catb_test_proba / N_FOLDS
-    print(f'  CatBoost  | BA: {catb_ba:.6f} | F1: {catb_f1:.6f} | iter: {catb.get_best_iteration()}')
+    catb_val_ba = balanced_accuracy_score(y_val_fold, catb_val_proba.argmax(axis=1))
+    catb_scores.append(catb_val_ba)
+    catb_models.append(catb)
+    print(f'  CatBoost  | Val BA: {catb_val_ba:.6f} | iter: {catb.get_best_iteration()} | {catb_train_t:.1f}s')
 
     # --- XGBoost ---
+    t0 = time.time()
     xgb = XGBClassifier(
-        n_estimators=1000,
+        n_estimators=3000,
         learning_rate=0.03,
         eval_metric='mlogloss',
-        early_stopping_rounds=100,
         device='cuda',
         random_state=RANDOM_STATE,
-        verbosity=0
+        verbosity=0,
+        callbacks=[XGBEarlyStopping(rounds=100, min_delta=0.002, save_best=True)]
     )
     sample_weights = compute_sample_weight(class_weight='balanced', y=y_train_fold)
-    xgb.fit(X_train_fold, y_train_fold, sample_weight=sample_weights, eval_set=[(X_val_fold, y_val_fold)], verbose=False)
+    xgb.fit(X_train_fold, y_train_fold, sample_weight=sample_weights,
+            eval_set=[(X_val_fold, y_val_fold)], verbose=False)
+    xgb_train_t = time.time() - t0
 
     xgb_val_proba = xgb.predict_proba(X_val_fold)
     oof_xgb[val_idx] = xgb_val_proba
-    xgb_ba = balanced_accuracy_score(y_val_fold, xgb_val_proba.argmax(axis=1))
-    xgb_f1 = f1_score(y_val_fold, xgb_val_proba.argmax(axis=1), average='macro')
-    xgb_scores.append(xgb_ba)
-    xgb_test_proba = xgb.predict_proba(X_test_fold)
-    test_xgb += xgb_test_proba / N_FOLDS
-    print(f'  XGBoost   | BA: {xgb_ba:.6f} | F1: {xgb_f1:.6f} | iter: {xgb.best_iteration}')
+    xgb_val_ba = balanced_accuracy_score(y_val_fold, xgb_val_proba.argmax(axis=1))
+    xgb_scores.append(xgb_val_ba)
+    xgb_models.append(xgb)
+    print(f'  XGBoost   | Val BA: {xgb_val_ba:.6f} | iter: {xgb.best_iteration} | {xgb_train_t:.1f}s')
 
     # --- LightGBM ---
+    t0 = time.time()
     lgb = LGBMClassifier(
-        n_estimators=1000,
+        n_estimators=3000,
         learning_rate=0.03,
         class_weight='balanced',
-        objective='multiclass',
         device='gpu',
         random_state=RANDOM_STATE,
         verbose=-1
     )
-    lgb.fit(X_train_fold, y_train_fold, eval_set=[(X_val_fold, y_val_fold)], eval_metric='multi_logloss',
-            callbacks=[lgb_early_stopping(100), lgb_log_eval(0)])
+    with contextlib.redirect_stdout(io.StringIO()):
+        lgb.fit(X_train_fold, y_train_fold, eval_set=[(X_val_fold, y_val_fold)], eval_metric='multi_logloss',
+                callbacks=[lgb_early_stopping(100, min_delta=0.002, verbose=False), lgb_log_eval(0)])
+    lgb_train_t = time.time() - t0
 
-    lgb_val_proba = lgb.predict_proba(X_val_fold)
+    best_iter = lgb.best_iteration_
+    lgb_val_proba = lgb.predict_proba(X_val_fold, num_iteration=best_iter)
     oof_lgb[val_idx] = lgb_val_proba
-    lgb_ba = balanced_accuracy_score(y_val_fold, lgb_val_proba.argmax(axis=1))
-    lgb_f1 = f1_score(y_val_fold, lgb_val_proba.argmax(axis=1), average='macro')
-    lgb_scores.append(lgb_ba)
-    lgb_test_proba = lgb.predict_proba(X_test_fold)
+    lgb_val_ba = balanced_accuracy_score(y_val_fold, lgb_val_proba.argmax(axis=1))
+    lgb_scores.append(lgb_val_ba)
+    lgb_models.append(lgb)
+    print(f'  LightGBM  | Val BA: {lgb_val_ba:.6f} | iter: {lgb.best_iteration_} | {lgb_train_t:.1f}s')
+
+    # --- Test predictions (accumulate) ---
+    t0 = time.time()
+    catb_test_proba = catb.predict_proba(X_test_fold)
+    test_catb += catb_test_proba / N_FOLDS
+    xgb_test_proba = xgb.predict_proba(X_test_fold)
+    test_xgb += xgb_test_proba / N_FOLDS
+    lgb_test_proba = lgb.predict_proba(X_test_fold, num_iteration=best_iter)
     test_lgb += lgb_test_proba / N_FOLDS
-    print(f'  LightGBM  | BA: {lgb_ba:.6f} | F1: {lgb_f1:.6f} | iter: {lgb.best_iteration_}')
+    test_inf_time = time.time() - t0
+
+    fold_time = time.time() - fold_start
+    inference_time = fold_time - te_time - catb_train_t - xgb_train_t - lgb_train_t - test_inf_time
+    print(f'  ─{"─"*57}')
+    print(f'  Fold {fold+1} total: {fold_time:.1f}s')
+    print(f'    TE: {te_time:.1f}s  |  Cat: {catb_train_t:.1f}s  |  XGB: {xgb_train_t:.1f}s  |  '
+          f'LGB: {lgb_train_t:.1f}s  |  Val: {inference_time:.1f}s  |  Test: {test_inf_time:.1f}s')
 
 print(f'\n{"="*60}')
 print(f'CatBoost CV: {np.mean(catb_scores):.6f} +/- {np.std(catb_scores):.6f}')
